@@ -176,10 +176,12 @@ def fetch_data(ticker_list, index_group):
     
     if use_cache:
         st.info("Loading from local cache (data < 15 mins old)...")
+        logging.info(f"Cache HIT for {index_group}")
         cached_df = load_from_db(index_group)
     
     if cached_df is None: 
         # Cache miss or stale -> Download
+        logging.info(f"Cache MISS or Stale for {index_group}. Downloading from Yahoo Finance...")
         data = yf.download(ticker_list, period="40d", interval="1d", group_by='ticker')
         # Save to DB for next time
         save_to_db(data, index_group, ticker_list)
@@ -254,21 +256,33 @@ def fetch_data(ticker_list, index_group):
             
     return pd.DataFrame(all_results), last_date
 
+import logging
+import streamlit_analytics
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 st.title("📊 Nifty 50 Volume Dashboard")
 
 # Refresh Button
 if st.button('🔄 Refresh Market Data'):
     st.cache_data.clear()
+    logging.info("User requested manual cache refresh.")
 
-with st.spinner(f"Fetching data for {selected_index}..."):
-    df, latest_date = fetch_data(tickers, selected_index)
+with streamlit_analytics.track():
+    with st.spinner(f"Fetching data for {selected_index}..."):
+        logging.info(f"Fetching data for {selected_index}...")
+        df, latest_date = fetch_data(tickers, selected_index)
 
-if latest_date:
-    st.caption(f"Last Data Update: {latest_date.strftime('%Y-%m-%d %H:%M:%S')}")
+    if latest_date:
+        st.caption(f"Last Data Update: {latest_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
-if not df.empty:
-    # Sort by Multiplier to see highest surges first
-    df = df.sort_values(by="Multiplier", ascending=False)
+    if not df.empty:
+        # Sort by Multiplier to see highest surges first
+        df = df.sort_values(by="Multiplier", ascending=False)
+        
+        # Log success
+        logging.info(f"Successfully loaded {len(df)} tickers for {selected_index}")
 
     # Layout: Chart on Top, Table Below
     
