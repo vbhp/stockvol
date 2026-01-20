@@ -175,7 +175,6 @@ def fetch_data(ticker_list, index_group):
     use_cache = is_cache_valid(index_group)
     
     if use_cache:
-        st.toast("Loading from local cache (data < 15 mins old)...", icon="ℹ️")
         logging.info(f"Cache HIT for {index_group}")
         cached_df = load_from_db(index_group)
     
@@ -262,25 +261,74 @@ def fetch_data(ticker_list, index_group):
     return pd.DataFrame(all_results), last_updated_time
 
 import logging
-import streamlit_analytics
+try:
+    import streamlit_analytics2 as streamlit_analytics
+except ImportError:
+    import streamlit_analytics
+import pytz
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def to_ist(dt_obj):
+    if dt_obj is None:
+        return None
+    # If naive, assume UTC (since we store UTC-ish or naive in DB, usually system time)
+    # Actually DB saves naive local time. Let's assume system is UTC or convert appropriately.
+    # To be safe: Localize to system time then convert to IST.
+    # Simpler: Just force assume it implies local system time, convert to IST.
+    utc_plus_5_30 = pytz.timezone('Asia/Kolkata')
+    
+    if dt_obj.tzinfo is None:
+        # Assume the server time is what matches the DB time.
+        # Ideally we should store UTC. But for now, let's localize to naive and convert.
+        # If server is GMT, we just add 5:30.
+        # If we run on Streamlit Cloud (UTC), this works.
+        dt_obj = pytz.utc.localize(dt_obj)
+        
+    return dt_obj.astimezone(utc_plus_5_30)
+
 st.title("📊 Nifty 50 Volume Dashboard")
 
-# Refresh Button
+# Simplified Refresh Logic
 if st.button('🔄 Refresh Market Data'):
-    st.cache_data.clear()
-    logging.info("User requested manual cache refresh.")
+    # Check if we can actually refresh
+    conn = sqlite3.connect('stocks.db')
+    c = conn.cursor()
+    c.execute("SELECT last_updated FROM cache_tracking WHERE index_group = ?", (selected_index,))
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        last_updated_db = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S.%f')
+        elapsed = datetime.now() - last_updated_db
+        cooldown = timedelta(minutes=15)
+        
+        if elapsed < cooldown:
+            remaining = cooldown - elapsed
+            mins = (remaining.seconds // 60) + 1 # Round up for clarity
+            st.warning(f"Market data is already fresh! Next manual refresh available in ~{mins} minutes.")
+            logging.info(f"User refresh rejected: {mins} mins remaining.")
+        else:
+            st.cache_data.clear()
+            logging.info("User requested manual cache refresh.")
+            st.rerun()
+    else:
+        st.cache_data.clear()
+        st.rerun()
 
 with streamlit_analytics.track():
     with st.spinner(f"Fetching data for {selected_index}..."):
         logging.info(f"Fetching data for {selected_index}...")
+        # Check cache status for UI feedback before calling fetch_data
+        if is_cache_valid(selected_index):
+            st.toast("Loading from local cache (data < 15 mins old)...", icon="ℹ️")
+        
         df, latest_update_time = fetch_data(tickers, selected_index)
 
     if latest_update_time:
-        st.caption(f"Last Data Update: {latest_update_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        ist_time = to_ist(latest_update_time)
+        st.caption(f"Last Data Update: {ist_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
     if not df.empty:
         # Sort by Multiplier to see highest surges first

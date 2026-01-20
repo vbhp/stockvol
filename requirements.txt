@@ -5,4 +5,5 @@ plotly
 ta
 requests
 matplotlib
-streamlit-analytics
+streamlit-analytics2
+pytz
