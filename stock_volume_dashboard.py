@@ -284,36 +284,36 @@ with streamlit_analytics.track():
         # Log success
         logging.info(f"Successfully loaded {len(df)} tickers for {selected_index}")
 
-    # Layout: Chart on Top, Table Below
-    
-    st.subheader("Visualizing Volume vs Average")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df['Ticker'], y=df['Multiplier'], name="Volume Multiplier"))
-    fig.add_hline(y=1.0, line_dash="dash", line_color="red", annotation_text="SMA 20 Baseline")
-    fig.update_layout(yaxis_title="Multiplier (x times Avg)")
-    st.plotly_chart(fig, use_container_width=True)
+        # Layout: Chart on Top, Table Below
+        
+        st.subheader("Visualizing Volume vs Average")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=df['Ticker'], y=df['Multiplier'], name="Volume Multiplier"))
+        fig.add_hline(y=1.0, line_dash="dash", line_color="red", annotation_text="SMA 20 Baseline")
+        fig.update_layout(yaxis_title="Multiplier (x times Avg)")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Top Volume Surges")
-    
-    # Calculate dynamic height: ~35px per row + header buffer
-    # Cap max height to avoid page getting too crazy long if 500 rows, or let it grow as requested
-    # User said "show entire data", so let's let it grow.
-    dynamic_height = (len(df) + 1) * 35 + 3 
+        st.subheader("Top Volume Surges")
+        
+        # Calculate dynamic height: ~35px per row + header buffer
+        # Cap max height to avoid page getting too crazy long if 500 rows, or let it grow as requested
+        # User said "show entire data", so let's let it grow.
+        dynamic_height = (len(df) + 1) * 35 + 3 
 
-    # Styling for readability
-    st.dataframe(
-        df.style.background_gradient(subset=['Multiplier'], cmap='RdYlGn')
-                .background_gradient(subset=['Price Change %'], cmap='RdYlGn', vmin=-2, vmax=2)
-                .background_gradient(subset=['Net Vol Estimate'], cmap='RdYlGn', vmin=-1000000, vmax=1000000)
-                .format({
-                    'Current Volume': "{:,.2f}",
-                    '20D Avg Vol (Prev)': "{:,.2f}",
-                    'Multiplier': "{:,.2f}",
-                    'Price Change %': "{:.2f}%", 
-                    'Net Vol Estimate': "{:,.2f}"
-                }),
-        use_container_width=True,
-        height=dynamic_height
-    )
-else:
-    st.error("Still no data. Try checking if you can access [finance.yahoo.com](https://finance.yahoo.com) in your browser.")
+        # Styling for readability
+        st.dataframe(
+            df.style.background_gradient(subset=['Multiplier'], cmap='RdYlGn')
+                    .background_gradient(subset=['Price Change %'], cmap='RdYlGn', vmin=-2, vmax=2)
+                    .background_gradient(subset=['Net Vol Estimate'], cmap='RdYlGn', vmin=-1000000, vmax=1000000)
+                    .format({
+                        'Current Volume': "{:,.2f}",
+                        '20D Avg Vol (Prev)': "{:,.2f}",
+                        'Multiplier': "{:,.2f}",
+                        'Price Change %': "{:.2f}%", 
+                        'Net Vol Estimate': "{:,.2f}"
+                    }),
+            use_container_width=True,
+            height=dynamic_height
+        )
+    else:
+        st.error("Still no data. Try checking if you can access [finance.yahoo.com](https://finance.yahoo.com) in your browser.")
