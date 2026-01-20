@@ -288,7 +288,7 @@ def to_ist(dt_obj):
         
     return dt_obj.astimezone(utc_plus_5_30)
 
-st.title("📊 Nifty 50 Volume Dashboard")
+st.title(f"📊 {selected_index} Volume Dashboard")
 
 # Simplified Refresh Logic
 if st.button('🔄 Refresh Market Data'):
