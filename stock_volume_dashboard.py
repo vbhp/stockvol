@@ -175,7 +175,7 @@ def fetch_data(ticker_list, index_group):
     use_cache = is_cache_valid(index_group)
     
     if use_cache:
-        st.info("Loading from local cache (data < 15 mins old)...")
+        st.toast("Loading from local cache (data < 15 mins old)...", icon="ℹ️")
         logging.info(f"Cache HIT for {index_group}")
         cached_df = load_from_db(index_group)
     
@@ -185,10 +185,18 @@ def fetch_data(ticker_list, index_group):
         data = yf.download(ticker_list, period="40d", interval="1d", group_by='ticker')
         # Save to DB for next time
         save_to_db(data, index_group, ticker_list)
+        last_updated_time = datetime.now()
     else:
-        # Prepare cached data to look like 'data' object for standard processing
-        # We can just filter the cached_df
-        pass
+        # Get timestamp from DB
+        conn = sqlite3.connect('stocks.db')
+        c = conn.cursor()
+        c.execute("SELECT last_updated FROM cache_tracking WHERE index_group = ?", (index_group,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            last_updated_time = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            last_updated_time = datetime.now()
 
     last_date = None
     
@@ -216,9 +224,6 @@ def fetch_data(ticker_list, index_group):
                 # Current volume is the last row
                 curr_vol = float(df['Volume'].iloc[-1])
                 curr_date = df.index[-1].strftime('%Y-%m-%d')
-                
-                if last_date is None:
-                    last_date = df.index[-1]
                 
                 # Previous 20 days average (excluding today)
                 # slice from -21 to -1 (last 20 rows before the final one)
@@ -254,7 +259,7 @@ def fetch_data(ticker_list, index_group):
         except Exception as e:
             continue
             
-    return pd.DataFrame(all_results), last_date
+    return pd.DataFrame(all_results), last_updated_time
 
 import logging
 import streamlit_analytics
@@ -272,10 +277,10 @@ if st.button('🔄 Refresh Market Data'):
 with streamlit_analytics.track():
     with st.spinner(f"Fetching data for {selected_index}..."):
         logging.info(f"Fetching data for {selected_index}...")
-        df, latest_date = fetch_data(tickers, selected_index)
+        df, latest_update_time = fetch_data(tickers, selected_index)
 
-    if latest_date:
-        st.caption(f"Last Data Update: {latest_date.strftime('%Y-%m-%d %H:%M:%S')}")
+    if latest_update_time:
+        st.caption(f"Last Data Update: {latest_update_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     if not df.empty:
         # Sort by Multiplier to see highest surges first
