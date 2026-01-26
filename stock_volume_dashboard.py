@@ -289,7 +289,7 @@ def compute_sma_status(df):
 def compute_technical_indicators(df, nifty_df=None, ticker_name=None, debug=False):
     """
     Compute technical indicators for a stock DataFrame.
-    Requires at least 55 rows of data for RS55.
+    Returns partial results based on available data (N/A for indicators needing more data).
 
     Args:
         df: DataFrame with 'close' column
@@ -298,28 +298,40 @@ def compute_technical_indicators(df, nifty_df=None, ticker_name=None, debug=Fals
         debug: If True, print debug info
 
     Returns:
-        dict with RS55 (vs Nifty), RS55_Abs (absolute), EMA21, EMA55, RSI14
+        dict with RS55 (vs Nifty), EMA21, EMA55, EMA100, EMA200, RSI14
     """
-    if df.empty or len(df) < 200:
-        return {'rs55': None, 'ema21': None, 'ema55': None, 'ema100': None, 'ema200': None, 'rsi14': None}
+    result = {'rs55': None, 'ema21': None, 'ema55': None, 'ema100': None, 'ema200': None, 'rsi14': None}
+
+    if df.empty or len(df) < 14:
+        return result
 
     close = df['close']
+    data_len = len(df)
 
-    # EMA calculations using pandas ewm with adjust=True (matches TradingView/public sources)
-    ema21 = close.ewm(span=21, adjust=True).mean().iloc[-1]
-    ema55 = close.ewm(span=55, adjust=True).mean().iloc[-1]
-    ema100 = close.ewm(span=100, adjust=True).mean().iloc[-1]
-    ema200 = close.ewm(span=200, adjust=True).mean().iloc[-1]
+    # EMA calculations - only compute if enough data
+    if data_len >= 21:
+        ema21 = close.ewm(span=21, adjust=True).mean().iloc[-1]
+        result['ema21'] = round(ema21, 2) if pd.notna(ema21) else None
+    if data_len >= 55:
+        ema55 = close.ewm(span=55, adjust=True).mean().iloc[-1]
+        result['ema55'] = round(ema55, 2) if pd.notna(ema55) else None
+    if data_len >= 100:
+        ema100 = close.ewm(span=100, adjust=True).mean().iloc[-1]
+        result['ema100'] = round(ema100, 2) if pd.notna(ema100) else None
+    if data_len >= 200:
+        ema200 = close.ewm(span=200, adjust=True).mean().iloc[-1]
+        result['ema200'] = round(ema200, 2) if pd.notna(ema200) else None
 
     # RSI 14
-    rsi14_indicator = RSIIndicator(close=close, window=14)
-    rsi14 = rsi14_indicator.rsi().iloc[-1]
+    if data_len >= 14:
+        rsi14_indicator = RSIIndicator(close=close, window=14)
+        rsi14 = rsi14_indicator.rsi().iloc[-1]
+        result['rsi14'] = round(rsi14, 2) if pd.notna(rsi14) else None
 
     # Relative RS55 - Stock performance vs Nifty 50
     # Formula: (baseSymbol / baseSymbol[55]) / (comparativeSymbol / comparativeSymbol[55]) - 1
     # IMPORTANT: Align dates between stock and Nifty to ensure same trading days
-    rs55 = None
-    if nifty_df is not None and len(nifty_df) >= 56:
+    if data_len >= 56 and nifty_df is not None and len(nifty_df) >= 56:
         try:
             # Prepare stock data with date index
             stock_df = df[['close']].copy()
@@ -345,6 +357,7 @@ def compute_technical_indicators(df, nifty_df=None, ticker_name=None, debug=Fals
 
                 if nifty_55_ago > 0 and nifty_now > 0 and stock_55_ago > 0:
                     rs55 = (stock_now / stock_55_ago) / (nifty_now / nifty_55_ago) - 1
+                    result['rs55'] = round(rs55, 2)
 
                     # Debug logging (prints to console)
                     if debug and ticker_name:
@@ -355,14 +368,7 @@ def compute_technical_indicators(df, nifty_df=None, ticker_name=None, debug=Fals
             if debug and ticker_name:
                 print(f"RS55 Error [{ticker_name}]: {e}")
 
-    return {
-        'rs55': round(rs55, 2) if rs55 is not None else None,
-        'ema21': round(ema21, 2) if ema21 else None,
-        'ema55': round(ema55, 2) if ema55 else None,
-        'ema100': round(ema100, 2) if ema100 else None,
-        'ema200': round(ema200, 2) if ema200 else None,
-        'rsi14': round(rsi14, 2) if rsi14 else None
-    }
+    return result
 
 
 def load_from_db(index_group):
@@ -501,7 +507,7 @@ def fetch_data(ticker_list, index_group):
             if df.empty:
                 continue
 
-            if len(df) >= 201: # Need at least 21 days (20 prev + 1 current)
+            if len(df) >= 21:  # Need at least 21 days for volume analysis (indicators show N/A if insufficient data)
                 # Current volume is the last row
                 curr_vol = float(df['Volume'].iloc[-1])
                 curr_date = df.index[-1].strftime('%Y-%m-%d')
