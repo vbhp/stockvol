@@ -149,6 +149,10 @@ def init_db():
                  (index_group TEXT PRIMARY KEY, last_updated TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS ticker_lists
                  (index_name TEXT, symbol TEXT, last_updated TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS market_breadth
+                 (index_group TEXT, date TEXT, pct_above_sma20 REAL, pct_above_sma50 REAL,
+                  pct_above_sma100 REAL, pct_above_sma200 REAL, total_stocks INTEGER,
+                  PRIMARY KEY (index_group, date))''')
     conn.commit()
     conn.close()
 
@@ -597,7 +601,8 @@ def to_ist(dt_obj):
 def calculate_market_breadth(ticker_list, index_group):
     """
     Calculate market breadth - percentage of stocks above each SMA.
-    Returns dict with percentages for SMA 20, 50, 100, 200.
+    Calculates historical data for line chart and stores in DB.
+    Returns dict with current data, historical data, and per-stock details.
     """
     if not ticker_list:
         return None
@@ -607,13 +612,70 @@ def calculate_market_breadth(ticker_list, index_group):
     if cached_df is None:
         return None
 
-    above_sma20 = 0
-    above_sma50 = 0
-    above_sma100 = 0
-    above_sma200 = 0
-    total_valid = 0
+    # Get all unique dates (need at least 200 days for SMA200)
+    all_dates = sorted(cached_df['date'].unique())
+    if len(all_dates) < 200:
+        return None
 
-    breadth_details = []  # Store per-stock details
+    # Calculate breadth for each date (last 50 trading days for the chart)
+    dates_to_calc = all_dates[-50:]
+    historical_breadth = []
+
+    for calc_date in dates_to_calc:
+        above_sma20 = 0
+        above_sma50 = 0
+        above_sma100 = 0
+        above_sma200 = 0
+        total_valid = 0
+
+        for ticker in ticker_list:
+            try:
+                ticker_data = cached_df[cached_df['ticker'] == ticker].copy()
+                ticker_data = ticker_data.sort_values('date')
+
+                # Get data up to calc_date
+                ticker_data = ticker_data[ticker_data['date'] <= calc_date]
+                if len(ticker_data) < 200:
+                    continue
+
+                close = ticker_data['close']
+                current_price = close.iloc[-1]
+
+                sma20 = close.rolling(window=20).mean().iloc[-1]
+                sma50 = close.rolling(window=50).mean().iloc[-1]
+                sma100 = close.rolling(window=100).mean().iloc[-1]
+                sma200 = close.rolling(window=200).mean().iloc[-1]
+
+                total_valid += 1
+
+                if pd.notna(sma20) and current_price > sma20:
+                    above_sma20 += 1
+                if pd.notna(sma50) and current_price > sma50:
+                    above_sma50 += 1
+                if pd.notna(sma100) and current_price > sma100:
+                    above_sma100 += 1
+                if pd.notna(sma200) and current_price > sma200:
+                    above_sma200 += 1
+
+            except Exception:
+                continue
+
+        if total_valid > 0:
+            historical_breadth.append({
+                'date': calc_date,
+                'pct_above_sma20': round((above_sma20 / total_valid) * 100, 1),
+                'pct_above_sma50': round((above_sma50 / total_valid) * 100, 1),
+                'pct_above_sma100': round((above_sma100 / total_valid) * 100, 1),
+                'pct_above_sma200': round((above_sma200 / total_valid) * 100, 1),
+                'total_stocks': total_valid
+            })
+
+    if not historical_breadth:
+        return None
+
+    # Get current (latest) data and per-stock details
+    latest = historical_breadth[-1]
+    breadth_details = []
 
     for ticker in ticker_list:
         try:
@@ -626,17 +688,6 @@ def calculate_market_breadth(ticker_list, index_group):
 
             if sma_status is None:
                 continue
-
-            total_valid += 1
-
-            if sma_status['above_sma20']:
-                above_sma20 += 1
-            if sma_status['above_sma50']:
-                above_sma50 += 1
-            if sma_status['above_sma100']:
-                above_sma100 += 1
-            if sma_status['above_sma200']:
-                above_sma200 += 1
 
             breadth_details.append({
                 'Ticker': ticker.replace('.NS', ''),
@@ -655,19 +706,13 @@ def calculate_market_breadth(ticker_list, index_group):
             logging.error(f"Error calculating SMA for {ticker}: {e}")
             continue
 
-    if total_valid == 0:
-        return None
-
     return {
-        'pct_above_sma20': round((above_sma20 / total_valid) * 100, 1),
-        'pct_above_sma50': round((above_sma50 / total_valid) * 100, 1),
-        'pct_above_sma100': round((above_sma100 / total_valid) * 100, 1),
-        'pct_above_sma200': round((above_sma200 / total_valid) * 100, 1),
-        'above_sma20': above_sma20,
-        'above_sma50': above_sma50,
-        'above_sma100': above_sma100,
-        'above_sma200': above_sma200,
-        'total_stocks': total_valid,
+        'pct_above_sma20': latest['pct_above_sma20'],
+        'pct_above_sma50': latest['pct_above_sma50'],
+        'pct_above_sma100': latest['pct_above_sma100'],
+        'pct_above_sma200': latest['pct_above_sma200'],
+        'total_stocks': latest['total_stocks'],
+        'history': pd.DataFrame(historical_breadth),
         'details': pd.DataFrame(breadth_details)
     }
 
@@ -733,12 +778,84 @@ with streamlit_analytics.track():
     if not df.empty:
         # Sort by Multiplier to see highest surges first
         df = df.sort_values(by="Multiplier", ascending=False)
-        
+
         # Log success
         logging.info(f"Successfully loaded {len(df)} tickers for {selected_index}")
 
-        # Layout: Chart on Top, Table Below
-        
+        # Market Health Section - Stocks Above SMA (at the top)
+        st.subheader(f"📈 {selected_index} % Above Moving Averages")
+
+        breadth_data = calculate_market_breadth(tickers, selected_index)
+
+        if breadth_data and 'history' in breadth_data:
+            history_df = breadth_data['history']
+
+            # Current values header
+            current_vals = f"**SMA20:** {breadth_data['pct_above_sma20']}  |  **SMA50:** {breadth_data['pct_above_sma50']}  |  **SMA100:** {breadth_data['pct_above_sma100']}  |  **SMA200:** {breadth_data['pct_above_sma200']}  ⊘ 80.0  50.0  20.0"
+            st.markdown(current_vals)
+
+            # Two columns: Line chart on left, Data table on right
+            col_chart, col_table = st.columns([2, 1])
+
+            with col_chart:
+                fig_lines = go.Figure()
+                fig_lines.add_trace(go.Scatter(
+                    x=history_df['date'], y=history_df['pct_above_sma20'],
+                    mode='lines', name='SMA 20', line=dict(color='#ff9800', width=2)
+                ))
+                fig_lines.add_trace(go.Scatter(
+                    x=history_df['date'], y=history_df['pct_above_sma50'],
+                    mode='lines', name='SMA 50', line=dict(color='#4caf50', width=2)
+                ))
+                fig_lines.add_trace(go.Scatter(
+                    x=history_df['date'], y=history_df['pct_above_sma100'],
+                    mode='lines', name='SMA 100', line=dict(color='#f44336', width=2)
+                ))
+                fig_lines.add_trace(go.Scatter(
+                    x=history_df['date'], y=history_df['pct_above_sma200'],
+                    mode='lines', name='SMA 200', line=dict(color='#000000', width=2)
+                ))
+                fig_lines.add_hline(y=80, line_dash="dash", line_color="gray", opacity=0.5)
+                fig_lines.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
+                fig_lines.add_hline(y=20, line_dash="dash", line_color="gray", opacity=0.5)
+                fig_lines.update_layout(
+                    yaxis_title="% of Stocks", yaxis_range=[0, 100], xaxis_title="",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=300, margin=dict(l=40, r=40, t=30, b=40)
+                )
+                st.plotly_chart(fig_lines, use_container_width=True)
+
+            with col_table:
+                st.markdown("**% above**")
+                table_data = history_df.tail(10).copy()
+                table_data = table_data.iloc[::-1]
+                table_data['date'] = pd.to_datetime(table_data['date']).dt.strftime('%d-%b')
+                table_display = table_data[['date', 'pct_above_sma20', 'pct_above_sma50', 'pct_above_sma100', 'pct_above_sma200']].copy()
+                table_display.columns = ['Date', '20MA', '50MA', '100MA', '200MA']
+
+                def color_cell(val):
+                    if isinstance(val, (int, float)):
+                        return 'background-color: #c8e6c9; color: #1b5e20' if val >= 50 else 'background-color: #ffcdd2; color: #b71c1c'
+                    return ''
+
+                styled_table = table_display.style.applymap(
+                    color_cell, subset=['20MA', '50MA', '100MA', '200MA']
+                ).format({'20MA': '{:.1f}', '50MA': '{:.1f}', '100MA': '{:.1f}', '200MA': '{:.1f}'})
+                st.dataframe(styled_table, use_container_width=True, hide_index=True, height=330)
+
+            # Overbought/Oversold alerts
+            all_pcts = [breadth_data['pct_above_sma20'], breadth_data['pct_above_sma50'],
+                        breadth_data['pct_above_sma100'], breadth_data['pct_above_sma200']]
+            if all(p >= 80 for p in all_pcts):
+                st.warning("⚠️ **Overbought**: All MAs above 80%")
+            elif all(p <= 20 for p in all_pcts):
+                st.success("🚀 **Oversold**: All MAs below 20%")
+        else:
+            st.info("Market breadth data calculating... (requires 200+ days of data)")
+
+        st.markdown("---")
+
+        # Volume Section
         st.subheader("Visualizing Volume vs Average")
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df['Ticker'], y=df['Multiplier'], name="Volume Multiplier"))
@@ -785,109 +902,6 @@ with streamlit_analytics.track():
             use_container_width=True,
             height=dynamic_height
         )
-
-        # Market Health Section - Stocks Above SMA
-        st.markdown("---")
-        st.subheader(f"📈 {selected_index} Market Health - Stocks Above SMA")
-
-        breadth_data = calculate_market_breadth(tickers, selected_index)
-
-        if breadth_data:
-            # Display metrics in columns
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                pct = breadth_data['pct_above_sma20']
-                color = "🟢" if pct >= 80 else "🔴" if pct <= 20 else "🟡"
-                st.metric(
-                    label=f"{color} Above SMA 20",
-                    value=f"{pct}%",
-                    delta=f"{breadth_data['above_sma20']}/{breadth_data['total_stocks']} stocks"
-                )
-
-            with col2:
-                pct = breadth_data['pct_above_sma50']
-                color = "🟢" if pct >= 80 else "🔴" if pct <= 20 else "🟡"
-                st.metric(
-                    label=f"{color} Above SMA 50",
-                    value=f"{pct}%",
-                    delta=f"{breadth_data['above_sma50']}/{breadth_data['total_stocks']} stocks"
-                )
-
-            with col3:
-                pct = breadth_data['pct_above_sma100']
-                color = "🟢" if pct >= 80 else "🔴" if pct <= 20 else "🟡"
-                st.metric(
-                    label=f"{color} Above SMA 100",
-                    value=f"{pct}%",
-                    delta=f"{breadth_data['above_sma100']}/{breadth_data['total_stocks']} stocks"
-                )
-
-            with col4:
-                pct = breadth_data['pct_above_sma200']
-                color = "🟢" if pct >= 80 else "🔴" if pct <= 20 else "🟡"
-                st.metric(
-                    label=f"{color} Above SMA 200",
-                    value=f"{pct}%",
-                    delta=f"{breadth_data['above_sma200']}/{breadth_data['total_stocks']} stocks"
-                )
-
-            # Market sentiment interpretation
-            all_pcts = [breadth_data['pct_above_sma20'], breadth_data['pct_above_sma50'],
-                        breadth_data['pct_above_sma100'], breadth_data['pct_above_sma200']]
-
-            if all(p >= 80 for p in all_pcts):
-                st.warning("⚠️ **Overbought Signal**: All SMAs above 80% - Market may be overheated, correction possible.")
-            elif all(p <= 20 for p in all_pcts):
-                st.success("🚀 **Oversold Signal**: All SMAs below 20% - Market may be oversold, rally possible.")
-
-            # Bar chart visualization
-            fig_breadth = go.Figure()
-            sma_labels = ['SMA 20', 'SMA 50', 'SMA 100', 'SMA 200']
-            sma_values = [breadth_data['pct_above_sma20'], breadth_data['pct_above_sma50'],
-                          breadth_data['pct_above_sma100'], breadth_data['pct_above_sma200']]
-
-            # Color based on value
-            colors = ['green' if v >= 50 else 'red' for v in sma_values]
-
-            fig_breadth.add_trace(go.Bar(
-                x=sma_labels,
-                y=sma_values,
-                marker_color=colors,
-                text=[f"{v}%" for v in sma_values],
-                textposition='outside'
-            ))
-
-            # Add reference lines
-            fig_breadth.add_hline(y=80, line_dash="dash", line_color="orange",
-                                   annotation_text="Overbought (80%)", annotation_position="right")
-            fig_breadth.add_hline(y=20, line_dash="dash", line_color="blue",
-                                   annotation_text="Oversold (20%)", annotation_position="right")
-            fig_breadth.add_hline(y=50, line_dash="dot", line_color="gray",
-                                   annotation_text="Neutral (50%)", annotation_position="right")
-
-            fig_breadth.update_layout(
-                title=f"Percentage of {selected_index} Stocks Above SMA",
-                yaxis_title="% of Stocks",
-                yaxis_range=[0, 100],
-                showlegend=False
-            )
-
-            st.plotly_chart(fig_breadth, use_container_width=True)
-
-            # Detailed table in expander
-            with st.expander("📋 View Detailed SMA Status for Each Stock"):
-                details_df = breadth_data['details']
-                st.dataframe(
-                    details_df.style.applymap(
-                        lambda x: 'color: green' if x == '✓' else 'color: red' if x == '✗' else '',
-                        subset=['>SMA20', '>SMA50', '>SMA100', '>SMA200']
-                    ),
-                    use_container_width=True,
-                    height=400
-                )
-        else:
-            st.info("Market breadth data not available. Ensure data is loaded first.")
 
     else:
         st.error("Still no data. Try checking if you can access [finance.yahoo.com](https://finance.yahoo.com) in your browser.")
