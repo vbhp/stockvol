@@ -7,3 +7,4 @@ requests
 matplotlib
 streamlit-analytics2
 pytz
+beautifulsoup4

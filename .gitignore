@@ -1,0 +1,22 @@
+# Environment variables (API keys)
+.env
+
+# Database
+stocks.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
