@@ -259,19 +259,20 @@ def get_historical_data(ticker, index_group, days=60):
 def compute_sma_status(df):
     """
     Compute SMA values and check if current price is above each SMA.
-    Returns dict with SMA values and above/below status.
+    Returns dict with SMA values and above/below status. Shows N/A for insufficient data.
     """
-    if df.empty or len(df) < 200:
+    if df.empty or len(df) < 20:
         return None
 
     close = df['close'] if 'close' in df.columns else df['Close']
     current_price = close.iloc[-1]
+    data_len = len(df)
 
-    # Calculate SMAs
-    sma20 = close.rolling(window=20).mean().iloc[-1]
-    sma50 = close.rolling(window=50).mean().iloc[-1]
-    sma100 = close.rolling(window=100).mean().iloc[-1]
-    sma200 = close.rolling(window=200).mean().iloc[-1]
+    # Calculate SMAs only where enough data exists
+    sma20 = close.rolling(window=20).mean().iloc[-1] if data_len >= 20 else None
+    sma50 = close.rolling(window=50).mean().iloc[-1] if data_len >= 50 else None
+    sma100 = close.rolling(window=100).mean().iloc[-1] if data_len >= 100 else None
+    sma200 = close.rolling(window=200).mean().iloc[-1] if data_len >= 200 else None
 
     return {
         'current_price': current_price,
@@ -634,6 +635,9 @@ def calculate_market_breadth(ticker_list, index_group):
         above_sma200 = 0
         total_valid = 0
 
+        # Track separate totals for each SMA (stocks may have different data lengths)
+        total_sma20 = total_sma50 = total_sma100 = total_sma200 = 0
+
         for ticker in ticker_list:
             try:
                 ticker_data = cached_df[cached_df['ticker'] == ticker].copy()
@@ -641,27 +645,42 @@ def calculate_market_breadth(ticker_list, index_group):
 
                 # Get data up to calc_date
                 ticker_data = ticker_data[ticker_data['date'] <= calc_date]
-                if len(ticker_data) < 200:
+                data_len = len(ticker_data)
+                if data_len < 20:
                     continue
 
                 close = ticker_data['close']
                 current_price = close.iloc[-1]
-
-                sma20 = close.rolling(window=20).mean().iloc[-1]
-                sma50 = close.rolling(window=50).mean().iloc[-1]
-                sma100 = close.rolling(window=100).mean().iloc[-1]
-                sma200 = close.rolling(window=200).mean().iloc[-1]
-
                 total_valid += 1
 
-                if pd.notna(sma20) and current_price > sma20:
-                    above_sma20 += 1
-                if pd.notna(sma50) and current_price > sma50:
-                    above_sma50 += 1
-                if pd.notna(sma100) and current_price > sma100:
-                    above_sma100 += 1
-                if pd.notna(sma200) and current_price > sma200:
-                    above_sma200 += 1
+                # Only calculate SMAs where enough data exists
+                if data_len >= 20:
+                    sma20 = close.rolling(window=20).mean().iloc[-1]
+                    if pd.notna(sma20):
+                        total_sma20 += 1
+                        if current_price > sma20:
+                            above_sma20 += 1
+
+                if data_len >= 50:
+                    sma50 = close.rolling(window=50).mean().iloc[-1]
+                    if pd.notna(sma50):
+                        total_sma50 += 1
+                        if current_price > sma50:
+                            above_sma50 += 1
+
+                if data_len >= 100:
+                    sma100 = close.rolling(window=100).mean().iloc[-1]
+                    if pd.notna(sma100):
+                        total_sma100 += 1
+                        if current_price > sma100:
+                            above_sma100 += 1
+
+                if data_len >= 200:
+                    sma200 = close.rolling(window=200).mean().iloc[-1]
+                    if pd.notna(sma200):
+                        total_sma200 += 1
+                        if current_price > sma200:
+                            above_sma200 += 1
 
             except Exception:
                 continue
@@ -669,10 +688,10 @@ def calculate_market_breadth(ticker_list, index_group):
         if total_valid > 0:
             historical_breadth.append({
                 'date': calc_date,
-                'pct_above_sma20': round((above_sma20 / total_valid) * 100, 1),
-                'pct_above_sma50': round((above_sma50 / total_valid) * 100, 1),
-                'pct_above_sma100': round((above_sma100 / total_valid) * 100, 1),
-                'pct_above_sma200': round((above_sma200 / total_valid) * 100, 1),
+                'pct_above_sma20': round((above_sma20 / total_sma20) * 100, 1) if total_sma20 > 0 else 0,
+                'pct_above_sma50': round((above_sma50 / total_sma50) * 100, 1) if total_sma50 > 0 else 0,
+                'pct_above_sma100': round((above_sma100 / total_sma100) * 100, 1) if total_sma100 > 0 else 0,
+                'pct_above_sma200': round((above_sma200 / total_sma200) * 100, 1) if total_sma200 > 0 else 0,
                 'total_stocks': total_valid
             })
 
@@ -686,7 +705,7 @@ def calculate_market_breadth(ticker_list, index_group):
     for ticker in ticker_list:
         try:
             ticker_data = cached_df[cached_df['ticker'] == ticker].copy()
-            if ticker_data.empty or len(ticker_data) < 200:
+            if ticker_data.empty or len(ticker_data) < 20:
                 continue
 
             ticker_data = ticker_data.sort_values('date')
