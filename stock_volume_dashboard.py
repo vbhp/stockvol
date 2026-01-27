@@ -1,9 +1,13 @@
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-import yfinance as yf
+import logging
+from openchart import NSEData
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
+
+# Configure Logging early
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 st.set_page_config(page_title="Nifty 50 Volume Console", layout="wide")
 
@@ -139,6 +143,58 @@ def get_tickers(index_name):
 import sqlite3
 from datetime import datetime, timedelta
 
+# NSE Data Fetching with openchart
+def fetch_nse_stock_data(symbol, days=250):
+    """
+    Fetch historical stock data from NSE using openchart.
+    Symbol should be in format 'RELIANCE' (without .NS suffix).
+    Returns DataFrame with OHLCV data.
+    """
+    try:
+        nse = NSEData()
+        end = datetime.now()
+        start = end - timedelta(days=days + 50)  # Extra buffer for trading days
+
+        # openchart expects 'SYMBOL-EQ' format for equities
+        df = nse.historical(f'{symbol}-EQ', 'EQ', start, end, '1d')
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Reset index and rename for consistency with rest of code
+        df = df.reset_index()
+        df = df.rename(columns={'Timestamp': 'Date'})
+        return df
+    except Exception as e:
+        logging.warning(f"Error fetching NSE data for {symbol}: {e}")
+        return pd.DataFrame()
+
+
+def fetch_nse_index_data(index_name='NIFTY 50', days=250):
+    """
+    Fetch historical index data from NSE using openchart.
+    Returns DataFrame with OHLCV data for the index.
+    """
+    try:
+        nse = NSEData()
+        end = datetime.now()
+        start = end - timedelta(days=days + 50)
+
+        df = nse.historical(index_name, 'IDX', start, end, '1d')
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df.reset_index()
+        df = df.rename(columns={'Timestamp': 'Date', 'Close': 'close', 'Open': 'open',
+                                'High': 'high', 'Low': 'low', 'Volume': 'volume'})
+        df['date'] = df['Date']
+        return df
+    except Exception as e:
+        logging.warning(f"Error fetching NSE index data for {index_name}: {e}")
+        return pd.DataFrame()
+
+
 # Database Functions
 def init_db():
     conn = sqlite3.connect('stocks.db')
@@ -225,6 +281,44 @@ def save_to_db(data, index_group, tickers):
                               (ticker, row['Date'].strftime('%Y-%m-%d'), row.get('Open', 0), row.get('High', 0),
                                row.get('Low', 0), row.get('Close', 0), row.get('Volume', 0), index_group))
         except Exception:
+            continue
+
+    # Update timestamp
+    c.execute("INSERT OR REPLACE INTO cache_tracking VALUES (?, ?)", (index_group, datetime.now()))
+    conn.commit()
+    conn.close()
+
+
+def save_nse_data_to_db(data_dict, index_group):
+    """
+    Save NSE stock data to DB using UPSERT pattern.
+    data_dict: {ticker: DataFrame} where DataFrame has Date, Open, High, Low, Close, Volume columns
+    """
+    conn = sqlite3.connect('stocks.db')
+    c = conn.cursor()
+
+    # Create unique index if not exists (for UPSERT to work)
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_prices_unique
+                 ON stock_prices(ticker, date, index_group)''')
+
+    for ticker, df in data_dict.items():
+        try:
+            if df.empty:
+                continue
+            for _, row in df.iterrows():
+                date_val = row['Date']
+                if hasattr(date_val, 'strftime'):
+                    date_str = date_val.strftime('%Y-%m-%d')
+                else:
+                    date_str = str(date_val)[:10]
+
+                c.execute("""INSERT OR REPLACE INTO stock_prices
+                             (ticker, date, open, high, low, close, volume, index_group)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                          (ticker, date_str, row.get('Open', 0), row.get('High', 0),
+                           row.get('Low', 0), row.get('Close', 0), row.get('Volume', 0), index_group))
+        except Exception as e:
+            logging.warning(f"Error saving {ticker}: {e}")
             continue
 
     # Update timestamp
@@ -425,17 +519,17 @@ st.caption(f"Analyzing {len(tickers)} stocks from {selected_index}")
 @st.cache_data(ttl=600)
 def fetch_data(ticker_list, index_group):
     all_results = []
-    
+
     if not ticker_list:
         return pd.DataFrame(), None
 
     cached_df = None
     use_cache = is_cache_valid(index_group)
-    
+
     if use_cache:
         logging.info(f"Cache HIT for {index_group}")
         cached_df = load_from_db(index_group)
-    
+
     if cached_df is None:
         # Cache miss or stale -> Check if we need full fetch or incremental
         latest_date = get_latest_date_in_db(index_group)
@@ -444,16 +538,26 @@ def fetch_data(ticker_list, index_group):
         if latest_date and data_count >= 200:
             # We have enough historical data, do incremental fetch (last 5 days to catch up)
             days_since = (datetime.now() - latest_date).days
-            fetch_period = max(days_since + 2, 5)  # At least 5 days, or days since last + buffer
-            logging.info(f"Incremental fetch for {index_group}: {fetch_period} days (have {data_count} days in DB)")
-            data = yf.download(ticker_list, period=f"{fetch_period}d", interval="1d", group_by='ticker')
+            fetch_days = max(days_since + 2, 5)  # At least 5 days, or days since last + buffer
+            logging.info(f"Incremental fetch for {index_group}: {fetch_days} days (have {data_count} days in DB)")
         else:
             # First time or not enough data -> Full fetch
-            logging.info(f"Full fetch for {index_group}: 250 days (have {data_count} days in DB)")
-            data = yf.download(ticker_list, period="250d", interval="1d", group_by='ticker')
+            fetch_days = 365  # ~250 trading days
+            logging.info(f"Full fetch for {index_group}: {fetch_days} days (have {data_count} days in DB)")
+
+        # Fetch data from NSE using openchart
+        all_stock_data = {}
+        progress_bar = st.progress(0)
+        for idx, ticker in enumerate(ticker_list):
+            symbol = ticker.replace('.NS', '')
+            df = fetch_nse_stock_data(symbol, fetch_days)
+            if not df.empty:
+                all_stock_data[ticker] = df
+            progress_bar.progress((idx + 1) / len(ticker_list))
+        progress_bar.empty()
 
         # Save to DB (UPSERT will handle duplicates)
-        save_to_db(data, index_group, ticker_list)
+        save_nse_data_to_db(all_stock_data, index_group)
         last_updated_time = datetime.now()
 
         # Reload from DB to get complete dataset
@@ -472,18 +576,13 @@ def fetch_data(ticker_list, index_group):
 
     last_date = None
 
-    # Fetch Nifty 50 data for relative strength calculation
+    # Fetch Nifty 50 data for relative strength calculation (using NSE direct)
     nifty_df = None
     try:
-        nifty_data = yf.download("^NSEI", period="250d", interval="1d", progress=False)
-        if not nifty_data.empty:
-            # Handle MultiIndex columns from yfinance
-            if isinstance(nifty_data.columns, pd.MultiIndex):
-                nifty_data.columns = nifty_data.columns.get_level_values(0)
-            nifty_df = nifty_data.reset_index()
-            nifty_df = nifty_df.rename(columns={'Close': 'close', 'Date': 'date'})
+        nifty_df = fetch_nse_index_data('NIFTY 50', 365)
+        if not nifty_df.empty:
             nifty_df = nifty_df.sort_values('date').reset_index(drop=True)
-            logging.info(f"Fetched Nifty 50 data: {len(nifty_df)} days")
+            logging.info(f"Fetched Nifty 50 data from NSE: {len(nifty_df)} days")
     except Exception as e:
         logging.warning(f"Could not fetch Nifty 50 data: {e}")
 
@@ -575,15 +674,12 @@ def fetch_data(ticker_list, index_group):
             
     return pd.DataFrame(all_results), last_updated_time
 
-import logging
 try:
     import streamlit_analytics2 as streamlit_analytics
 except ImportError:
     import streamlit_analytics
 import pytz
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def to_ist(dt_obj):
     if dt_obj is None:
